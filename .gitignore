@@ -1,0 +1,23 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build output
+bin/
+obj/
+Debug/
+Release/
+Archon.exe
+
+# NuGet
+packages/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Environment and secrets
+.env
+*.pfx
+*.p12
