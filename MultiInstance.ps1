@@ -66,6 +66,20 @@ function Get-RobloxProcess {
     return $found
 }
 
+# the same Everyone-allowed DACL that CreateOpenMutex in Singleton.cs gives the
+# GUI's names. without it an elevated run creates them admin-only, and a normal
+# Roblox client is denied access where it would otherwise find the objects.
+function New-OpenMutexSecurity {
+    $security = New-Object System.Security.AccessControl.MutexSecurity
+    $everyone = New-Object System.Security.Principal.SecurityIdentifier(
+        [System.Security.Principal.WellKnownSidType]::WorldSid, $null)
+    $security.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule(
+        $everyone,
+        [System.Security.AccessControl.MutexRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow)))
+    return $security
+}
+
 # New-Object Mutex($true,$name) never throws when the name is already taken,
 # it just hands back an unowned mutex - check Owned, not just that this succeeded
 function New-SingletonLock {
@@ -77,7 +91,14 @@ function New-SingletonLock {
     $err = $null
 
     try {
-        $mutex = New-Object System.Threading.Mutex($true, $Name, [ref] $createdNew)
+        try {
+            $mutex = New-Object System.Threading.Mutex($true, $Name, [ref] $createdNew, (New-OpenMutexSecurity))
+        }
+        catch {
+            # the GUI's last fallback too - default security beats no lock at all
+            $mutex = New-Object System.Threading.Mutex($true, $Name, [ref] $createdNew)
+        }
+
         if ($createdNew) {
             $owned = $true
         }
