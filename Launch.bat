@@ -114,7 +114,11 @@ if "%ADMIN%"=="yes" (
     ping -n 3 127.0.0.1 >nul 2>&1
     goto menu
 )
-%PS% -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+REM the path sits inside a powershell '...' string, so any ' in it is doubled -
+REM a folder like C:\Users\O'Brien otherwise ends the string early
+set "SELF=%~f0"
+set "SELF=%SELF:'=''%"
+%PS% -Command "Start-Process -FilePath '%SELF%' -Verb RunAs"
 goto done
 
 :after

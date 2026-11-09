@@ -1,0 +1,5 @@
+# cmd.exe finds goto/call labels by seeking through the file, and in a batch
+# file with LF-only line endings it can miss them. without this a clone with
+# autocrlf off, or a GitHub zip download, hands out Launch.bat with LF endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf

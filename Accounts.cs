@@ -90,9 +90,10 @@ namespace Archon
             string path = FilePath;
             if (!File.Exists(path)) return accounts;
 
-            string[] lines;
-            try { lines = File.ReadAllLines(path, Encoding.UTF8); }
-            catch { return accounts; }
+            // a failed read throws rather than coming back empty. empty looks
+            // like "no saved accounts", and the next save would then write
+            // that over the real file. same av-scanner lock as in Save.
+            string[] lines = File.ReadAllLines(path, Encoding.UTF8);
 
             for (int i = 0; i < lines.Length; i++)
             {

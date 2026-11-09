@@ -151,6 +151,11 @@ namespace Archon
         private readonly Dictionary<int, DateTime> _lostWindowAt = new Dictionary<int, DateTime>();
 
         private readonly List<RobloxAccount> _accounts = new List<RobloxAccount>();
+
+        // accounts.dat is there but couldn't be read. nothing gets saved until
+        // a read goes through, or the empty list would replace the whole file.
+        private bool _accountsUnread;
+
         private readonly PerformanceSettings _perf = PerformanceSettings.Load();
 
         private static readonly int[] FpsPresets = { 0, 30, 60, 120, 144, 240, PerformanceSettings.Unlimited };
@@ -167,6 +172,7 @@ namespace Archon
         private TextBox _fpsInput;
         private System.Windows.Forms.Timer _frames;
         private System.Windows.Forms.Timer _poll;
+        private readonly List<FileSystemWatcher> _settingsWatchers = new List<FileSystemWatcher>();
         private Icon _appIcon;
         private Icon _trayIconImage;
         private NotifyIcon _trayIcon;
@@ -213,12 +219,15 @@ namespace Archon
 
             using (Graphics g = CreateGraphics()) _scale = g.DpiX / 96f;
 
-            // Size not ClientSize - the client area already covers the whole window
-            Size = new Size(Dev(1060f), Dev(740f));
-            MinimumSize = new Size(Dev(1000f), Dev(720f));
+            // Size not ClientSize - the client area already covers the whole window.
+            // capped to the work area: at 150% on a 1080p screen the design height
+            // is taller than the screen, and centring that pushed the title bar
+            // and its buttons off the top
+            Rectangle work = Screen.FromControl(this).WorkingArea;
+            Size = new Size(Math.Min(Dev(1060f), work.Width), Math.Min(Dev(740f), work.Height));
+            MinimumSize = new Size(Math.Min(Dev(1000f), work.Width), Math.Min(Dev(720f), work.Height));
 
             // CenterScreen already ran against the old size, redo it
-            Rectangle work = Screen.FromControl(this).WorkingArea;
             Location = new Point(work.X + (work.Width - Width) / 2,
                                  work.Y + (work.Height - Height) / 2);
 
@@ -241,6 +250,43 @@ namespace Archon
                 RobloxTuning.ApplyFpsCap(_perf.TargetFps);
             };
             _poll.Start();
+
+            WatchClientSettings();
+        }
+
+        // the poll alone tends to lose the race with the bootstrapper, which
+        // resets ClientAppSettings.json just before the client reads it - and
+        // with the window in the tray, where it sits while you play, the poll
+        // only runs every 10s. this puts the cap back as soon as the file
+        // changes. the poll stays as the fallback, eg for a bootstrapper
+        // installed after startup.
+        private void WatchClientSettings()
+        {
+            foreach (string root in RobloxTuning.VersionRoots())
+            {
+                try
+                {
+                    FileSystemWatcher w = new FileSystemWatcher(root, "ClientAppSettings.json");
+                    w.IncludeSubdirectories = true;
+                    w.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite;
+
+                    // raised on an io thread
+                    FileSystemEventHandler touched = delegate { Post(new MethodInvoker(ReapplyFpsCap)); };
+                    w.Changed += touched;
+                    w.Created += touched;
+                    w.Renamed += delegate { Post(new MethodInvoker(ReapplyFpsCap)); };
+
+                    w.EnableRaisingEvents = true;
+                    _settingsWatchers.Add(w);
+                }
+                catch { /* the poll still covers this install */ }
+            }
+        }
+
+        private void ReapplyFpsCap()
+        {
+            RobloxTuning.ForgetVersionFolders();
+            RobloxTuning.ApplyFpsCap(_perf.TargetFps);
         }
 
         private void ApplyWindowChrome()
@@ -268,7 +314,9 @@ namespace Archon
             _placeInput.BackColor = Skin.Sunken;
             _placeInput.ForeColor = Skin.TextHi;
             _placeInput.Font = new Font(Skin.Body.FontFamily, 13f * _scale, FontStyle.Regular, GraphicsUnit.Pixel);
-            _placeInput.MaxLength = 20;
+            // room for a whole game or private server link, not just the id -
+            // MaxLength cuts a paste short too, and a cut link doesn't parse
+            _placeInput.MaxLength = 400;
             _placeInput.Text = LoadLastPlaceId();
             _placeInput.Visible = false;
             // Launch's enabled state is worked out at paint time from these boxes
@@ -485,9 +533,12 @@ namespace Archon
             Invalidate();
         }
 
+        // left button only, like real buttons. otherwise a right or middle
+        // click on the switch turns multi-instance off with no prompt
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
             _pressed = SpotAt(e.Location);
             Invalidate();
         }
@@ -495,6 +546,7 @@ namespace Archon
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (e.Button != MouseButtons.Left) return;
             string id = SpotAt(e.Location);
             string was = _pressed;
             _pressed = "";
@@ -712,11 +764,15 @@ namespace Archon
             {
                 using (Process p = Process.GetProcessById(pid))
                 {
+                    DateTime startedAt = StartTimeOf(p);
+
                     DialogResult answer = MessageBox.Show(this,
                         "Close this Roblox client (PID " + pid.ToString(CultureInfo.InvariantCulture) + ")?",
                         "Close client", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                     if (answer != DialogResult.Yes) return;
-                    p.Kill();
+
+                    // gone or replaced while the prompt was up, nothing to close
+                    if (StillSameProcess(p, startedAt)) p.Kill();
                 }
             }
             catch (ArgumentException)
@@ -727,6 +783,25 @@ namespace Archon
                 Warn("Could not close that client", ex.Message);
             }
             RefreshInstances();
+        }
+
+        // a confirm prompt can sit open for minutes, and Kill() goes by pid. if
+        // the client exits meanwhile windows can hand that pid to a brand new
+        // process, which would get killed instead. same pid and same start
+        // time means it's still the process the user said yes to.
+        private static DateTime StartTimeOf(Process p)
+        {
+            try { return p.StartTime; }
+            catch { return DateTime.MinValue; }
+        }
+
+        private static bool StillSameProcess(Process p, DateTime startedAt)
+        {
+            // unreadable before the prompt too, so nothing to compare against
+            if (startedAt == DateTime.MinValue) return true;
+
+            try { return !p.HasExited && p.StartTime == startedAt; }
+            catch { return false; }   // exited
         }
 
 
@@ -834,6 +909,10 @@ namespace Archon
                     return;
                 }
 
+                // read now, compared after the prompt - see StartTimeOf
+                DateTime[] startedAt = new DateTime[orphans.Count];
+                for (int i = 0; i < orphans.Count; i++) startedAt[i] = StartTimeOf(orphans[i]);
+
                 System.Text.StringBuilder detail = new System.Text.StringBuilder();
                 foreach (Process p in orphans)
                 {
@@ -860,9 +939,21 @@ namespace Archon
 
                 int ended = 0;
                 int failed = 0;
-                foreach (Process p in orphans)
+                for (int i = 0; i < orphans.Count; i++)
                 {
-                    try { p.Kill(); ended++; }
+                    Process p = orphans[i];
+                    try
+                    {
+                        // leave anything that exited or got replaced under the
+                        // same pid while the prompt was up, and any client that
+                        // was only starting and has its window by now
+                        p.Refresh();
+                        if (!StillSameProcess(p, startedAt[i]) || p.MainWindowHandle != IntPtr.Zero)
+                            continue;
+
+                        p.Kill();
+                        ended++;
+                    }
                     catch { failed++; }
                 }
 
@@ -1099,8 +1190,15 @@ namespace Archon
         private void LoadAccounts()
         {
             _accounts.Clear();
+            _accountsUnread = false;
             try { _accounts.AddRange(AccountStore.Load()); }
-            catch (Exception ex) { Warn("Could not read saved accounts", ex.Message); }
+            catch (Exception ex)
+            {
+                _accountsUnread = true;
+                Warn("Could not read saved accounts",
+                     ex.Message + "\r\n\r\nAccounts can't be added until the file can be read, " +
+                     "so the ones already saved aren't overwritten.");
+            }
 
             if (_selAccount >= _accounts.Count) _selAccount = _accounts.Count - 1;
             if (_selAccount < 0 && _accounts.Count > 0) _selAccount = 0;
@@ -1108,6 +1206,13 @@ namespace Archon
 
         private void AddAccount()
         {
+            // the lock that failed the startup read may be gone by now
+            if (_accountsUnread)
+            {
+                LoadAccounts();
+                if (_accountsUnread) return;
+            }
+
             using (AddAccountForm dialog = new AddAccountForm())
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null) return;
@@ -1153,6 +1258,7 @@ namespace Archon
 
         private void SaveAccounts()
         {
+            if (_accountsUnread) return;   // see _accountsUnread
             try { AccountStore.Save(_accounts); }
             catch (Exception ex) { Warn("Could not save accounts", ex.Message); }
         }
@@ -1557,7 +1663,7 @@ namespace Archon
                 if (r.Bottom < body.Y - 4f || r.Y > body.Bottom + 4f) continue;
 
                 Spot("card." + _instances[i].Pid, r);
-                PaintInstanceCard(g, r, _instances[i], i);
+                PaintInstanceCard(g, r, _instances[i]);
             }
 
             _spotClip = RectangleF.Empty;
@@ -1566,7 +1672,7 @@ namespace Archon
             PaintScrollHint(g, body, _instanceContentH, _instanceViewH, _instanceScroll);
         }
 
-        private void PaintInstanceCard(Graphics g, RectangleF r, InstanceRow inst, int index)
+        private void PaintInstanceCard(Graphics g, RectangleF r, InstanceRow inst)
         {
             bool selected = inst.Pid == _selInstancePid;
             float hover = Hover("card." + inst.Pid);
@@ -1627,8 +1733,8 @@ namespace Archon
             Spot("more." + inst.Pid, more);
 
             Widgets.Button(g, focus, "Focus", selected ? Btn.Primary : Btn.Secondary,
-                           Hover("focus." + index), inst.HasWindow, 10f);
-            Widgets.More(g, more, Hover("more." + index), 10f);
+                           Hover("focus." + inst.Pid), inst.HasWindow, 10f);
+            Widgets.More(g, more, Hover("more." + inst.Pid), 10f);
         }
 
         private void Metric(Graphics g, float x, float y, float w, string label, string value, float amount)
@@ -1661,7 +1767,9 @@ namespace Archon
             else
             {
                 GraphicsState state = g.Save();
-                g.SetClip(Skin.Inset(list, 1f), CombineMode.Intersect);
+                RectangleF clip = Skin.Inset(list, 1f);
+                g.SetClip(clip, CombineMode.Intersect);
+                _spotClip = clip;
 
                 for (int i = 0; i < _accounts.Count; i++)
                 {
@@ -2175,6 +2283,8 @@ namespace Archon
                 _singleton.Release();
                 if (_frames != null) { _frames.Stop(); _frames.Dispose(); _frames = null; }
                 if (_poll != null) { _poll.Stop(); _poll.Dispose(); _poll = null; }
+                foreach (FileSystemWatcher w in _settingsWatchers) w.Dispose();
+                _settingsWatchers.Clear();
                 if (_trayIcon != null) { _trayIcon.Visible = false; _trayIcon.Dispose(); _trayIcon = null; }
                 if (_trayMenu != null) { _trayMenu.Dispose(); _trayMenu = null; }
                 if (_appIcon != null) { _appIcon.Dispose(); _appIcon = null; }

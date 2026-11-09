@@ -35,8 +35,7 @@ Roblox files are never modified, patched, or injected into.
 - Can be enabled or disabled without restarting the launcher
 - Supports starting the launcher before or after Roblox
 - Does not modify or inject into Roblox files
-- Creates the named objects with an access control entry for `Everyone`
-- Applies a low-integrity label when the process has permission to do so, allowing medium-integrity Roblox clients to open the objects when the launcher is elevated
+- Creates the named objects with an access control entry for `Everyone`, so normal Roblox clients can still open them when the launcher runs as administrator
 
 ### Instance monitoring
 

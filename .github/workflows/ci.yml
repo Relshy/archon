@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and check
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # csc garbles the ui's symbols in a .cs file without a BOM (see Program.cs),
+      # Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI, and cmd can miss
+      # goto labels in a batch file with LF-only endings (see .gitattributes)
+      - name: Check encodings and line endings
+        shell: pwsh
+        run: |
+          $problems = @()
+          foreach ($f in Get-ChildItem *.cs, *.ps1) {
+            $b = [IO.File]::ReadAllBytes($f.FullName)
+            if ($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF) {
+              $problems += "::error file=$($f.Name)::not saved as UTF-8 with a BOM"
+            }
+          }
+          foreach ($f in Get-ChildItem *.bat, *.cmd) {
+            if ([IO.File]::ReadAllText($f.FullName) -match '(?<!\r)\n') {
+              $problems += "::error file=$($f.Name)::has LF-only line endings"
+            }
+          }
+          $problems | ForEach-Object { Write-Host $_ }
+          if ($problems) { exit 1 }
+
+      # the same compiler and command as Launch.bat option 4 - the .NET Framework
+      # csc only speaks C# 5 - with warnings treated as errors
+      - name: Build Archon.exe
+        shell: cmd
+        run: >
+          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /warn:4 /warnaserror+
+          /target:winexe /out:Archon.exe *.cs
+          /r:System.dll /r:System.Core.dll /r:System.Drawing.dll
+          /r:System.Windows.Forms.dll /r:System.Security.dll
+
+      # MultiInstance.ps1 runs on Windows PowerShell 5.1 and Add-Types
+      # HandleCloser.cs by itself, so that file has to compile on its own
+      - name: Check MultiInstance.ps1 and HandleCloser.cs
+        shell: powershell
+        run: |
+          $errs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$pwd\MultiInstance.ps1", [ref] $null, [ref] $errs)
+          if ($errs) {
+            foreach ($e in $errs) { Write-Host "::error file=MultiInstance.ps1,line=$($e.Extent.StartLineNumber)::$($e.Message)" }
+            exit 1
+          }
+          Add-Type -TypeDefinition ([IO.File]::ReadAllText("$pwd\HandleCloser.cs"))
+          if (-not ('Archon.RobloxHandleCloser' -as [type])) {
+            Write-Host '::error file=HandleCloser.cs::Archon.RobloxHandleCloser is missing'
+            exit 1
+          }
+
+      - name: Upload Archon.exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: Archon
+          path: Archon.exe
+          if-no-files-found: error
+          retention-days: 14

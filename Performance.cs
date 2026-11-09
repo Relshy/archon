@@ -99,8 +99,21 @@ namespace Archon
         private static readonly Dictionary<string, DateTime> _seenStamp = new Dictionary<string, DateTime>();
         private static int _lastTarget = -1;
 
+        // the last cap this app wrote. going back to default only takes out a
+        // flag that still holds it - any other value was set in bloxstrap or
+        // by hand, and default means leave it alone, not delete it.
+        private static int _ourFps;
+
         public static void ApplyFpsCap(int targetFps)
         {
+            if (targetFps > 0) _ourFps = targetFps;
+            else if (_ourFps <= 0)
+            {
+                // never capped anything, so there's nothing of ours to undo
+                _lastTarget = targetFps;
+                return;
+            }
+
             foreach (string versionDir in FindVersionFolders())
             {
                 string settingsDir = Path.Combine(versionDir, "ClientSettings");
@@ -108,15 +121,13 @@ namespace Archon
 
                 try
                 {
-                    // don't even read it if nothing changed since last time
-                    DateTime stamp;
-                    try
-                    {
-                        stamp = File.Exists(settingsPath)
-                            ? File.GetLastWriteTimeUtc(settingsPath)
-                            : DateTime.MinValue;
-                    }
-                    catch { stamp = DateTime.MinValue; }
+                    // don't even read it if nothing changed since last time.
+                    // a failed stat has to skip the file, not count as it
+                    // being missing - "missing" gets a fresh file holding only
+                    // our flag, written over whatever else is in there.
+                    DateTime stamp = File.Exists(settingsPath)
+                        ? File.GetLastWriteTimeUtc(settingsPath)
+                        : DateTime.MinValue;
 
                     DateTime lastSeen;
                     if (targetFps == _lastTarget &&
@@ -128,7 +139,7 @@ namespace Archon
 
                     string original = stamp == DateTime.MinValue ? null : File.ReadAllText(settingsPath);
 
-                    string updated = SetFlag(original, FpsFlag, targetFps);
+                    string updated = SetFlag(original, FpsFlag, targetFps, _ourFps);
                     if (updated == null) continue;          // already right, or not ours to touch
                     if (updated == original) continue;
 
@@ -137,6 +148,14 @@ namespace Archon
 
                     try { _seenStamp[settingsPath] = File.GetLastWriteTimeUtc(settingsPath); }
                     catch { _seenStamp.Remove(settingsPath); }
+                }
+                catch (IOException)
+                {
+                    // usually the bootstrapper holding the file mid-write, the
+                    // exact moment the cap matters. the stamp is already
+                    // recorded, so without forgetting it every later poll
+                    // would skip this file until something else changed it.
+                    _seenStamp.Remove(settingsPath);
                 }
                 catch { /* one unwritable install should not block the rest */ }
             }
@@ -160,15 +179,29 @@ namespace Archon
             return _cachedVersionDirs;
         }
 
-        private static IEnumerable<string> ScanVersionFolders()
+        // an update adds a version folder, and the settings file written into it
+        // is what the next client reads - no waiting out the cache for that one
+        public static void ForgetVersionFolders()
+        {
+            _cachedVersionDirs = null;
+        }
+
+        // the Versions folder of every bootstrapper that's installed
+        public static IEnumerable<string> VersionRoots()
         {
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
             foreach (string bootstrapper in BootstrapperNames)
             {
                 string versionsRoot = Path.Combine(localAppData, bootstrapper, "Versions");
-                if (!Directory.Exists(versionsRoot)) continue;
+                if (Directory.Exists(versionsRoot)) yield return versionsRoot;
+            }
+        }
 
+        private static IEnumerable<string> ScanVersionFolders()
+        {
+            foreach (string versionsRoot in VersionRoots())
+            {
                 string[] versionDirs;
                 try { versionDirs = Directory.GetDirectories(versionsRoot); }
                 catch { continue; }
@@ -184,7 +217,8 @@ namespace Archon
         // decimals, big ints and nested objects, and bloxstrap users have
         // whole fflag files sitting in here. returns null if there's nothing
         // to do or the file isn't an object literal.
-        private static string SetFlag(string json, string key, int value)
+        // a value of 0 clears the key, but only while it still holds `ours`.
+        private static string SetFlag(string json, string key, int value, int ours)
         {
             bool wanted = value > 0;
             string number = value.ToString(CultureInfo.InvariantCulture);
@@ -221,6 +255,8 @@ namespace Archon
             }
 
             if (!found.Success) return null;   // nothing to clear
+            if (found.Groups[1].Value != ours.ToString(CultureInfo.InvariantCulture))
+                return null;                   // not ours to clear
 
             string without = json.Substring(0, found.Index) +
                              json.Substring(found.Index + found.Length);
@@ -244,34 +280,51 @@ namespace Archon
             else File.Move(temp, path);
         }
 
-        // what we last set per pid. only write when it actually changes,
+        // what we last set per pid. only write what actually changed,
         // otherwise we stomp on anything the user does in task manager.
-        private static readonly Dictionary<int, string> _appliedTo = new Dictionary<int, string>();
+        private struct Applied
+        {
+            public ProcessPriorityClass Priority;
+            public int Cores;   // 0 means every core
+        }
+
+        private static readonly Dictionary<int, Applied> _appliedTo = new Dictionary<int, Applied>();
 
         public static void ApplyResourceLimits(Process p, ProcessPriorityClass priority, int coreLimit)
         {
             int pid;
             try { pid = p.Id; } catch { return; }
 
-            string wanted = priority + "/" + coreLimit.ToString(CultureInfo.InvariantCulture);
+            // 0 and anything at or past the core count both mean every core
+            int totalCores = Environment.ProcessorCount;
+            int cores = coreLimit > 0 && coreLimit < totalCores ? coreLimit : 0;
 
-            string already;
-            if (_appliedTo.TryGetValue(pid, out already) && already == wanted) return;
-            _appliedTo[pid] = wanted;
+            Applied before;
+            bool seen = _appliedTo.TryGetValue(pid, out before);
+            if (seen && before.Priority == priority && before.Cores == cores) return;
 
-            try { p.PriorityClass = priority; } catch { }
+            Applied now;
+            now.Priority = priority;
+            now.Cores = cores;
+            _appliedTo[pid] = now;
 
-            if (coreLimit <= 0) return;
+            if (!seen || before.Priority != priority)
+            {
+                try { p.PriorityClass = priority; } catch { }
+            }
+
+            // a client we never limited is already on every core. one we did
+            // keeps its mask until it's explicitly handed every core back.
+            int had = seen ? before.Cores : 0;
+            if (cores == had) return;
 
             try
             {
-                int totalCores = Environment.ProcessorCount;
-                if (coreLimit >= totalCores) return;
-
                 // lowest N logical cpus. on a hybrid chip that's hyperthread
                 // pairs not real cores, and past 64 cpus processor groups get
                 // ignored. one mask can't express either, so, whatever.
-                long mask = coreLimit >= 64 ? -1L : (1L << coreLimit) - 1L;
+                int n = cores > 0 ? cores : totalCores;
+                long mask = n >= 64 ? -1L : (1L << n) - 1L;
                 p.ProcessorAffinity = (IntPtr)mask;
             }
             catch { }

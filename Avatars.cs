@@ -166,7 +166,7 @@ namespace Archon
             req.Timeout = 15000;
             req.ReadWriteTimeout = 15000;
 
-            using (HttpWebResponse res = (HttpWebResponse)req.GetResponse())
+            using (HttpWebResponse res = GetResponse(req))
             using (StreamReader reader = new StreamReader(res.GetResponseStream()))
                 return reader.ReadToEnd();
         }
@@ -178,7 +178,7 @@ namespace Archon
             req.Timeout = 15000;
             req.ReadWriteTimeout = 15000;
 
-            using (HttpWebResponse res = (HttpWebResponse)req.GetResponse())
+            using (HttpWebResponse res = GetResponse(req))
             using (Stream stream = res.GetResponseStream())
             using (MemoryStream ms = new MemoryStream())
             {
@@ -187,6 +187,22 @@ namespace Archon
                 while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
                     ms.Write(buffer, 0, read);
                 return ms.ToArray();
+            }
+        }
+
+        // an error response holds one of the two pooled connections per host
+        // until it's disposed - the trap RobloxWeb.WhoAmI describes. a 429 or
+        // two from the thumbnail api would otherwise stall every avatar after.
+        private static HttpWebResponse GetResponse(HttpWebRequest req)
+        {
+            try
+            {
+                return (HttpWebResponse)req.GetResponse();
+            }
+            catch (WebException wex)
+            {
+                if (wex.Response != null) wex.Response.Close();
+                throw;
             }
         }
 
