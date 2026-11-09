@@ -28,7 +28,20 @@ namespace Archon
             catch (EntryPointNotFoundException) { }
 
             bool createdNew;
-            using (Mutex appMutex = new Mutex(true, "Archon_SingleInstance", out createdNew))
+            Mutex appMutex;
+            try
+            {
+                appMutex = new Mutex(true, "Archon_SingleInstance", out createdNew);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // a copy running as administrator made the name, and its default
+                // acl shuts this unelevated one out. it's still already running.
+                appMutex = null;
+                createdNew = false;
+            }
+
+            using (appMutex)
             {
                 if (!createdNew)
                 {
