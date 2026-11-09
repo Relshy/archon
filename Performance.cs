@@ -99,8 +99,21 @@ namespace Archon
         private static readonly Dictionary<string, DateTime> _seenStamp = new Dictionary<string, DateTime>();
         private static int _lastTarget = -1;
 
+        // the last cap this app wrote. going back to default only takes out a
+        // flag that still holds it - any other value was set in bloxstrap or
+        // by hand, and default means leave it alone, not delete it.
+        private static int _ourFps;
+
         public static void ApplyFpsCap(int targetFps)
         {
+            if (targetFps > 0) _ourFps = targetFps;
+            else if (_ourFps <= 0)
+            {
+                // never capped anything, so there's nothing of ours to undo
+                _lastTarget = targetFps;
+                return;
+            }
+
             foreach (string versionDir in FindVersionFolders())
             {
                 string settingsDir = Path.Combine(versionDir, "ClientSettings");
@@ -128,7 +141,7 @@ namespace Archon
 
                     string original = stamp == DateTime.MinValue ? null : File.ReadAllText(settingsPath);
 
-                    string updated = SetFlag(original, FpsFlag, targetFps);
+                    string updated = SetFlag(original, FpsFlag, targetFps, _ourFps);
                     if (updated == null) continue;          // already right, or not ours to touch
                     if (updated == original) continue;
 
@@ -184,7 +197,8 @@ namespace Archon
         // decimals, big ints and nested objects, and bloxstrap users have
         // whole fflag files sitting in here. returns null if there's nothing
         // to do or the file isn't an object literal.
-        private static string SetFlag(string json, string key, int value)
+        // a value of 0 clears the key, but only while it still holds `ours`.
+        private static string SetFlag(string json, string key, int value, int ours)
         {
             bool wanted = value > 0;
             string number = value.ToString(CultureInfo.InvariantCulture);
@@ -221,6 +235,8 @@ namespace Archon
             }
 
             if (!found.Success) return null;   // nothing to clear
+            if (found.Groups[1].Value != ours.ToString(CultureInfo.InvariantCulture))
+                return null;                   // not ours to clear
 
             string without = json.Substring(0, found.Index) +
                              json.Substring(found.Index + found.Length);
