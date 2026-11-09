@@ -179,15 +179,29 @@ namespace Archon
             return _cachedVersionDirs;
         }
 
-        private static IEnumerable<string> ScanVersionFolders()
+        // an update adds a version folder, and the settings file written into it
+        // is what the next client reads - no waiting out the cache for that one
+        public static void ForgetVersionFolders()
+        {
+            _cachedVersionDirs = null;
+        }
+
+        // the Versions folder of every bootstrapper that's installed
+        public static IEnumerable<string> VersionRoots()
         {
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
             foreach (string bootstrapper in BootstrapperNames)
             {
                 string versionsRoot = Path.Combine(localAppData, bootstrapper, "Versions");
-                if (!Directory.Exists(versionsRoot)) continue;
+                if (Directory.Exists(versionsRoot)) yield return versionsRoot;
+            }
+        }
 
+        private static IEnumerable<string> ScanVersionFolders()
+        {
+            foreach (string versionsRoot in VersionRoots())
+            {
                 string[] versionDirs;
                 try { versionDirs = Directory.GetDirectories(versionsRoot); }
                 catch { continue; }

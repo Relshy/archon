@@ -172,6 +172,7 @@ namespace Archon
         private TextBox _fpsInput;
         private System.Windows.Forms.Timer _frames;
         private System.Windows.Forms.Timer _poll;
+        private readonly List<FileSystemWatcher> _settingsWatchers = new List<FileSystemWatcher>();
         private Icon _appIcon;
         private Icon _trayIconImage;
         private NotifyIcon _trayIcon;
@@ -249,6 +250,43 @@ namespace Archon
                 RobloxTuning.ApplyFpsCap(_perf.TargetFps);
             };
             _poll.Start();
+
+            WatchClientSettings();
+        }
+
+        // the poll alone tends to lose the race with the bootstrapper, which
+        // resets ClientAppSettings.json just before the client reads it - and
+        // with the window in the tray, where it sits while you play, the poll
+        // only runs every 10s. this puts the cap back as soon as the file
+        // changes. the poll stays as the fallback, eg for a bootstrapper
+        // installed after startup.
+        private void WatchClientSettings()
+        {
+            foreach (string root in RobloxTuning.VersionRoots())
+            {
+                try
+                {
+                    FileSystemWatcher w = new FileSystemWatcher(root, "ClientAppSettings.json");
+                    w.IncludeSubdirectories = true;
+                    w.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite;
+
+                    // raised on an io thread
+                    FileSystemEventHandler touched = delegate { Post(new MethodInvoker(ReapplyFpsCap)); };
+                    w.Changed += touched;
+                    w.Created += touched;
+                    w.Renamed += delegate { Post(new MethodInvoker(ReapplyFpsCap)); };
+
+                    w.EnableRaisingEvents = true;
+                    _settingsWatchers.Add(w);
+                }
+                catch { /* the poll still covers this install */ }
+            }
+        }
+
+        private void ReapplyFpsCap()
+        {
+            RobloxTuning.ForgetVersionFolders();
+            RobloxTuning.ApplyFpsCap(_perf.TargetFps);
         }
 
         private void ApplyWindowChrome()
@@ -2245,6 +2283,8 @@ namespace Archon
                 _singleton.Release();
                 if (_frames != null) { _frames.Stop(); _frames.Dispose(); _frames = null; }
                 if (_poll != null) { _poll.Stop(); _poll.Dispose(); _poll = null; }
+                foreach (FileSystemWatcher w in _settingsWatchers) w.Dispose();
+                _settingsWatchers.Clear();
                 if (_trayIcon != null) { _trayIcon.Visible = false; _trayIcon.Dispose(); _trayIcon = null; }
                 if (_trayMenu != null) { _trayMenu.Dispose(); _trayMenu = null; }
                 if (_appIcon != null) { _appIcon.Dispose(); _appIcon = null; }
