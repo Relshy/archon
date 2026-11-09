@@ -244,34 +244,51 @@ namespace Archon
             else File.Move(temp, path);
         }
 
-        // what we last set per pid. only write when it actually changes,
+        // what we last set per pid. only write what actually changed,
         // otherwise we stomp on anything the user does in task manager.
-        private static readonly Dictionary<int, string> _appliedTo = new Dictionary<int, string>();
+        private struct Applied
+        {
+            public ProcessPriorityClass Priority;
+            public int Cores;   // 0 means every core
+        }
+
+        private static readonly Dictionary<int, Applied> _appliedTo = new Dictionary<int, Applied>();
 
         public static void ApplyResourceLimits(Process p, ProcessPriorityClass priority, int coreLimit)
         {
             int pid;
             try { pid = p.Id; } catch { return; }
 
-            string wanted = priority + "/" + coreLimit.ToString(CultureInfo.InvariantCulture);
+            // 0 and anything at or past the core count both mean every core
+            int totalCores = Environment.ProcessorCount;
+            int cores = coreLimit > 0 && coreLimit < totalCores ? coreLimit : 0;
 
-            string already;
-            if (_appliedTo.TryGetValue(pid, out already) && already == wanted) return;
-            _appliedTo[pid] = wanted;
+            Applied before;
+            bool seen = _appliedTo.TryGetValue(pid, out before);
+            if (seen && before.Priority == priority && before.Cores == cores) return;
 
-            try { p.PriorityClass = priority; } catch { }
+            Applied now;
+            now.Priority = priority;
+            now.Cores = cores;
+            _appliedTo[pid] = now;
 
-            if (coreLimit <= 0) return;
+            if (!seen || before.Priority != priority)
+            {
+                try { p.PriorityClass = priority; } catch { }
+            }
+
+            // a client we never limited is already on every core. one we did
+            // keeps its mask until it's explicitly handed every core back.
+            int had = seen ? before.Cores : 0;
+            if (cores == had) return;
 
             try
             {
-                int totalCores = Environment.ProcessorCount;
-                if (coreLimit >= totalCores) return;
-
                 // lowest N logical cpus. on a hybrid chip that's hyperthread
                 // pairs not real cores, and past 64 cpus processor groups get
                 // ignored. one mask can't express either, so, whatever.
-                long mask = coreLimit >= 64 ? -1L : (1L << coreLimit) - 1L;
+                int n = cores > 0 ? cores : totalCores;
+                long mask = n >= 64 ? -1L : (1L << n) - 1L;
                 p.ProcessorAffinity = (IntPtr)mask;
             }
             catch { }
