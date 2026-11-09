@@ -1663,7 +1663,9 @@ namespace Archon
             else
             {
                 GraphicsState state = g.Save();
-                g.SetClip(Skin.Inset(list, 1f), CombineMode.Intersect);
+                RectangleF clip = Skin.Inset(list, 1f);
+                g.SetClip(clip, CombineMode.Intersect);
+                _spotClip = clip;
 
                 for (int i = 0; i < _accounts.Count; i++)
                 {
