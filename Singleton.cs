@@ -74,36 +74,24 @@ namespace Archon
                 _locks.Add(AcquireOne(Names[i]));
         }
 
-        // run elevated and the default descriptor gives the object a High
-        // integrity label, which makes roblox's CreateEventW fail with
+        // run elevated and the names get the elevated token's default
+        // descriptor, which makes roblox's CreateEventW fail with
         // ACCESS_DENIED instead of INVALID_HANDLE. different path in roblox,
-        // no reason it behaves the same. so: everyone gets access, label it low.
-        // the label needs SeSecurityPrivilege, hence the fallbacks.
+        // no reason it behaves the same. so: everyone gets access.
+        //
+        // no low-integrity label on top - MutexSecurity can't carry one. it
+        // drops the ML ace, and the empty SACL left behind needs
+        // SeSecurityPrivilege, so creating the mutex with it just throws.
         private static Mutex CreateOpenMutex(string name, out bool createdNew)
         {
-            MutexSecurity security = new MutexSecurity();
-            security.AddAccessRule(new MutexAccessRule(
-                new SecurityIdentifier(WellKnownSidType.WorldSid, null),
-                MutexRights.FullControl,
-                AccessControlType.Allow));
-
             try
             {
-                security.SetSecurityDescriptorSddlForm("S:(ML;;NW;;;LW)", AccessControlSections.Audit);
-                return new Mutex(true, name, out createdNew, security);
-            }
-            catch (Exception)
-            {
-            }
-
-            try
-            {
-                MutexSecurity daclOnly = new MutexSecurity();
-                daclOnly.AddAccessRule(new MutexAccessRule(
+                MutexSecurity security = new MutexSecurity();
+                security.AddAccessRule(new MutexAccessRule(
                     new SecurityIdentifier(WellKnownSidType.WorldSid, null),
                     MutexRights.FullControl,
                     AccessControlType.Allow));
-                return new Mutex(true, name, out createdNew, daclOnly);
+                return new Mutex(true, name, out createdNew, security);
             }
             catch (Exception)
             {
