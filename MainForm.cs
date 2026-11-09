@@ -268,7 +268,9 @@ namespace Archon
             _placeInput.BackColor = Skin.Sunken;
             _placeInput.ForeColor = Skin.TextHi;
             _placeInput.Font = new Font(Skin.Body.FontFamily, 13f * _scale, FontStyle.Regular, GraphicsUnit.Pixel);
-            _placeInput.MaxLength = 20;
+            // room for a whole game or private server link, not just the id -
+            // MaxLength cuts a paste short too, and a cut link doesn't parse
+            _placeInput.MaxLength = 400;
             _placeInput.Text = LoadLastPlaceId();
             _placeInput.Visible = false;
             // Launch's enabled state is worked out at paint time from these boxes
