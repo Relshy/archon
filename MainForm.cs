@@ -218,12 +218,15 @@ namespace Archon
 
             using (Graphics g = CreateGraphics()) _scale = g.DpiX / 96f;
 
-            // Size not ClientSize - the client area already covers the whole window
-            Size = new Size(Dev(1060f), Dev(740f));
-            MinimumSize = new Size(Dev(1000f), Dev(720f));
+            // Size not ClientSize - the client area already covers the whole window.
+            // capped to the work area: at 150% on a 1080p screen the design height
+            // is taller than the screen, and centring that pushed the title bar
+            // and its buttons off the top
+            Rectangle work = Screen.FromControl(this).WorkingArea;
+            Size = new Size(Math.Min(Dev(1060f), work.Width), Math.Min(Dev(740f), work.Height));
+            MinimumSize = new Size(Math.Min(Dev(1000f), work.Width), Math.Min(Dev(720f), work.Height));
 
             // CenterScreen already ran against the old size, redo it
-            Rectangle work = Screen.FromControl(this).WorkingArea;
             Location = new Point(work.X + (work.Width - Width) / 2,
                                  work.Y + (work.Height - Height) / 2);
 
