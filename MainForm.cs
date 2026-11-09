@@ -1263,19 +1263,27 @@ namespace Archon
             catch (Exception ex) { Warn("Could not save accounts", ex.Message); }
         }
 
-        private bool TryResolvePlaceId(out long placeId)
+        // whether the boxes name something to launch. checked at paint time
+        private bool HasLaunchTarget()
         {
+            long placeId;
             string code;
             bool isLinkCode;
-            return TryResolveTarget(out placeId, out code, out isLinkCode);
+            string shareCode;
+            return TryResolveTarget(out placeId, out code, out isLinkCode, out shareCode);
         }
 
-        // either box may hold a full private server link, not just the server box
-        private bool TryResolveTarget(out long placeId, out string code, out bool isLinkCode)
+        // either box may hold a full private server link, not just the server box.
+        // a share link names the place and the server both, but only a web call
+        // can say which, and this runs at paint time - so it comes back as
+        // shareCode, standing for the whole target, for the launch worker to resolve
+        private bool TryResolveTarget(out long placeId, out string code, out bool isLinkCode,
+                                      out string shareCode)
         {
             placeId = 0;
             code = null;
             isLinkCode = false;
+            shareCode = null;
 
             string placeText = _placeInput.Text.Trim();
             string serverText = _serverInput.Text.Trim();
@@ -1314,6 +1322,22 @@ namespace Archon
                         isLinkCode = serverIsLink;
                     }
                 }
+                else if (RobloxWeb.TryParseShareLink(serverText, out shareCode))
+                {
+                    // wins over the place box too. that usually still holds the
+                    // last launch's place, and a server's code only works in its own
+                    placeId = 0;
+                    code = null;
+                    isLinkCode = false;
+                    return true;
+                }
+            }
+
+            // the place box's only counts when the server box named no server
+            if (string.IsNullOrEmpty(code) && RobloxWeb.TryParseShareLink(placeText, out shareCode))
+            {
+                placeId = 0;
+                return true;
             }
 
             return placeId > 0;
@@ -1328,7 +1352,8 @@ namespace Archon
             long placeId;
             string accessCode;
             bool isLinkCode;
-            if (!TryResolveTarget(out placeId, out accessCode, out isLinkCode))
+            string shareCode;
+            if (!TryResolveTarget(out placeId, out accessCode, out isLinkCode, out shareCode))
             {
                 Info("Enter the place ID of the game you want to join.\r\n\r\n" +
                      "It is the number in the game's URL:\r\n" +
@@ -1346,7 +1371,8 @@ namespace Archon
                 if (answer != DialogResult.Yes) return;
             }
 
-            SaveLastPlaceId(placeId);
+            // a share link's place isn't known until the worker resolves it
+            if (shareCode == null) SaveLastPlaceId(placeId);
 
             _busy = true;
             Invalidate();
@@ -1361,9 +1387,7 @@ namespace Archon
                 try
                 {
                     string cookie = AccountStore.Unprotect(account.ProtectedCookie);
-                    string ticket = RobloxWeb.GetAuthTicket(cookie, out error);
-                    if (!string.IsNullOrEmpty(ticket))
-                        url = RobloxWeb.BuildLaunchUrl(ticket, placeId, accessCode, isLinkCode);
+                    url = GetLaunchUrl(cookie, placeId, accessCode, isLinkCode, shareCode, out error);
                 }
                 catch (Exception ex)
                 {
@@ -1373,6 +1397,24 @@ namespace Archon
                 Post(new Action<string, string, string, HashSet<int>>(OnTicketReady),
                      url, error, account.Label, baselinePids);
             });
+        }
+
+        // runs on the launch worker. a share link's place and server are only
+        // known once it's resolved, and then they're the whole target
+        private static string GetLaunchUrl(string cookie, long placeId, string code, bool isLinkCode,
+                                           string shareCode, out string error)
+        {
+            if (shareCode != null)
+            {
+                if (!RobloxWeb.ResolveShareLink(cookie, shareCode, out placeId, out code, out error))
+                    return null;
+                isLinkCode = true;
+                SaveLastPlaceId(placeId);
+            }
+
+            string ticket = RobloxWeb.GetAuthTicket(cookie, out error);
+            if (string.IsNullOrEmpty(ticket)) return null;
+            return RobloxWeb.BuildLaunchUrl(ticket, placeId, code, isLinkCode);
         }
 
         private void OnTicketReady(string launchUrl, string error, string label, HashSet<int> baselinePids)
@@ -1885,9 +1927,7 @@ namespace Archon
             Widgets.Button(g, add, "Add account", Btn.Secondary, Hover("acct.add"), !_busy, 9f);
             Widgets.Button(g, remove, "Remove", Btn.Secondary, Hover("acct.remove"), hasSelection && !_busy, 9f);
 
-            long placeId;
-            bool validPlace = TryResolvePlaceId(out placeId);
-            bool canLaunch = hasSelection && validPlace && !_busy;
+            bool canLaunch = hasSelection && HasLaunchTarget() && !_busy;
 
             RectangleF launch = new RectangleF(x, add.Y - 10f - 40f, w, 40f);
             Spot("launch", launch);

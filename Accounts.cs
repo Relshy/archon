@@ -179,7 +179,8 @@ namespace Archon
         public string DisplayName;
     }
 
-    // the two web calls we need: check a cookie, and swap it for a ticket
+    // the web calls we need: check a cookie, swap it for a ticket, and look up
+    // what a share link points at
     static class RobloxWeb
     {
         static RobloxWeb()
@@ -257,38 +258,50 @@ namespace Archon
             }
         }
 
-        // swaps the cookie for a one-shot ticket. the first post is meant to
-        // 403 - that's how you get the csrf token for the real one.
+        // swaps the cookie for a one-shot ticket
         public static string GetAuthTicket(string cookie, out string error)
         {
+            using (HttpWebResponse res = PostWithCsrf("https://auth.roblox.com/v1/authentication-ticket/",
+                                                      cookie, "", out error))
+            {
+                if (res == null) return null;
+
+                string ticket = res.Headers["rbx-authentication-ticket"];
+                if (string.IsNullOrEmpty(ticket))
+                {
+                    error = "Roblox accepted the request but returned no ticket.";
+                    return null;
+                }
+                return ticket;
+            }
+        }
+
+        // hands back the response for the caller to read and dispose, or null
+        // with error set. the first post is meant to 403 - that's how you get
+        // the csrf token for the real one.
+        private static HttpWebResponse PostWithCsrf(string url, string cookie, string json, out string error)
+        {
             error = null;
+            byte[] body = Encoding.UTF8.GetBytes(json);
 
             string csrf = null;
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 try
                 {
-                    HttpWebRequest req = Build("https://auth.roblox.com/v1/authentication-ticket/", "POST", cookie);
+                    HttpWebRequest req = Build(url, "POST", cookie);
                     req.ContentType = "application/json";
-                    req.ContentLength = 0;
+                    req.ContentLength = body.Length;
                     if (csrf != null) req.Headers["X-CSRF-TOKEN"] = csrf;
 
-                    using (req.GetRequestStream()) { }
+                    using (Stream stream = req.GetRequestStream())
+                        stream.Write(body, 0, body.Length);
 
-                    using (HttpWebResponse res = (HttpWebResponse)req.GetResponse())
-                    {
-                        string ticket = res.Headers["rbx-authentication-ticket"];
-                        if (string.IsNullOrEmpty(ticket))
-                        {
-                            error = "Roblox accepted the request but returned no ticket.";
-                            return null;
-                        }
-                        return ticket;
-                    }
+                    return (HttpWebResponse)req.GetResponse();
                 }
                 catch (WebException wex)
                 {
-                    // disposed for the same reason as in GetIdentity
+                    // disposed for the same reason as in WhoAmI
                     bool retryWithToken = false;
 
                     using (WebResponse raw = wex.Response)
@@ -325,8 +338,77 @@ namespace Archon
                 }
             }
 
-            error = "Could not obtain an authentication ticket.";
+            error = "Roblox kept rejecting the request.";
             return null;
+        }
+
+        // asks roblox which private server a share link's code points at.
+        // signed out it only answers 401, so this needs the account's cookie.
+        public static bool ResolveShareLink(string cookie, string shareCode, out long placeId,
+                                            out string linkCode, out string error)
+        {
+            placeId = 0;
+            linkCode = null;
+
+            // shareCode comes from TryParseShareLink, which only lets through
+            // [0-9A-Za-z_-], so it needs no escaping. "Server" is the link's
+            // type=, the only one that points at a private server.
+            string json = "{\"linkId\":\"" + shareCode + "\",\"linkType\":\"Server\"}";
+
+            string body;
+            using (HttpWebResponse res = PostWithCsrf("https://apis.roblox.com/sharelinks/v1/resolve-link",
+                                                      cookie, json, out error))
+            {
+                if (res == null) return false;
+                using (StreamReader reader = new StreamReader(res.GetResponseStream()))
+                    body = reader.ReadToEnd();
+            }
+
+            return ReadPrivateServerInvite(body, out placeId, out linkCode, out error);
+        }
+
+        // the answer has one member per link type, null except the one asked
+        // for: "privateServerInviteData": {"status": "Valid", "ownerUserId": ..,
+        // "universeId": .., "privateServerId": .., "linkCode": "..", "placeId": ..}
+        private static bool ReadPrivateServerInvite(string body, out long placeId, out string linkCode,
+                                                    out string error)
+        {
+            placeId = 0;
+            linkCode = null;
+            error = null;
+
+            // flat, so it ends at the first }. the fields are read from inside
+            // it only - other link types have a placeId of their own
+            Match m = Regex.Match(body, "\"privateServerInviteData\"\\s*:\\s*(\\{[^{}]*\\})");
+            if (!m.Success)
+            {
+                error = "Roblox did not return a private server for that share link.";
+                return false;
+            }
+            string invite = m.Groups[1].Value;
+
+            // Valid, Expired or Invalid. stop at anything but Valid, with a
+            // reason, rather than launch and find out in the client
+            string status = ReadString(invite, "status");
+            if (status != null && !string.Equals(status, "Valid", StringComparison.OrdinalIgnoreCase))
+            {
+                error = string.Equals(status, "Expired", StringComparison.OrdinalIgnoreCase)
+                    ? "That share link has expired. Ask for a new one."
+                    : "That share link is not valid.";
+                return false;
+            }
+
+            long place = ReadLong(invite, "placeId");
+            string code = ReadString(invite, "linkCode");
+            if (place <= 0 || string.IsNullOrEmpty(code))
+            {
+                error = "Roblox did not say which server that share link is for.";
+                return false;
+            }
+
+            placeId = place;
+            linkCode = code;
+            return true;
         }
 
         // builds the roblox-player:// url. this format is roblox's and they
@@ -391,8 +473,8 @@ namespace Archon
                     long.TryParse(placeMatch.Groups[1].Value, NumberStyles.Integer,
                                   CultureInfo.InvariantCulture, out placeId);
 
-                // share links use privateServerLinkCode, old vip urls use
-                // accessCode. not interchangeable, different param each.
+                // private server links use privateServerLinkCode, old vip urls
+                // use accessCode. not interchangeable, different param each.
                 Match linkMatch = Regex.Match(s, "[?&]privateServerLinkCode=([^&\\s]+)", RegexOptions.IgnoreCase);
                 if (linkMatch.Success)
                 {
@@ -427,6 +509,39 @@ namespace Archon
 
             code = null;
             return false;
+        }
+
+        // what the Share button gives out for a private server now:
+        // roblox.com/share?code=<code>&type=Server. in a browser that lands on
+        // roblox.com/share-links?code=..., so take that too. the code isn't a
+        // server code - only ResolveShareLink can turn it into one, and that's
+        // a web call, so it's kept apart from TryParsePrivateServerLink.
+        public static bool TryParseShareLink(string input, out string shareCode)
+        {
+            shareCode = null;
+            if (string.IsNullOrEmpty(input)) return false;
+
+            string s = input.Trim();
+            if (s.IndexOf("roblox.com", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            if (!Regex.IsMatch(s, "/share(-links)?/?\\?", RegexOptions.IgnoreCase)) return false;
+
+            // type= also covers experience invites, profiles and so on. only
+            // Server is a private server.
+            Match type = Regex.Match(s, "[?&]type=([^&#\\s]+)", RegexOptions.IgnoreCase);
+            if (!type.Success ||
+                !string.Equals(Uri.UnescapeDataString(type.Groups[1].Value), "Server",
+                               StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            Match code = Regex.Match(s, "[?&]code=([^&#\\s]+)", RegexOptions.IgnoreCase);
+            if (!code.Success) return false;
+
+            // ResolveShareLink puts it in a json body as-is
+            string value = Uri.UnescapeDataString(code.Groups[1].Value);
+            if (!Regex.IsMatch(value, "^[0-9A-Za-z_-]{1,128}$")) return false;
+
+            shareCode = value;
+            return true;
         }
 
         public static void Launch(string launchUrl)
