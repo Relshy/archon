@@ -487,9 +487,12 @@ namespace Archon
             Invalidate();
         }
 
+        // left button only, like real buttons. otherwise a right or middle
+        // click on the switch turns multi-instance off with no prompt
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
             _pressed = SpotAt(e.Location);
             Invalidate();
         }
@@ -497,6 +500,7 @@ namespace Archon
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (e.Button != MouseButtons.Left) return;
             string id = SpotAt(e.Location);
             string was = _pressed;
             _pressed = "";
