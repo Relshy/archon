@@ -723,11 +723,15 @@ namespace Archon
             {
                 using (Process p = Process.GetProcessById(pid))
                 {
+                    DateTime startedAt = StartTimeOf(p);
+
                     DialogResult answer = MessageBox.Show(this,
                         "Close this Roblox client (PID " + pid.ToString(CultureInfo.InvariantCulture) + ")?",
                         "Close client", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                     if (answer != DialogResult.Yes) return;
-                    p.Kill();
+
+                    // gone or replaced while the prompt was up, nothing to close
+                    if (StillSameProcess(p, startedAt)) p.Kill();
                 }
             }
             catch (ArgumentException)
@@ -738,6 +742,25 @@ namespace Archon
                 Warn("Could not close that client", ex.Message);
             }
             RefreshInstances();
+        }
+
+        // a confirm prompt can sit open for minutes, and Kill() goes by pid. if
+        // the client exits meanwhile windows can hand that pid to a brand new
+        // process, which would get killed instead. same pid and same start
+        // time means it's still the process the user said yes to.
+        private static DateTime StartTimeOf(Process p)
+        {
+            try { return p.StartTime; }
+            catch { return DateTime.MinValue; }
+        }
+
+        private static bool StillSameProcess(Process p, DateTime startedAt)
+        {
+            // unreadable before the prompt too, so nothing to compare against
+            if (startedAt == DateTime.MinValue) return true;
+
+            try { return !p.HasExited && p.StartTime == startedAt; }
+            catch { return false; }   // exited
         }
 
 
@@ -845,6 +868,10 @@ namespace Archon
                     return;
                 }
 
+                // read now, compared after the prompt - see StartTimeOf
+                DateTime[] startedAt = new DateTime[orphans.Count];
+                for (int i = 0; i < orphans.Count; i++) startedAt[i] = StartTimeOf(orphans[i]);
+
                 System.Text.StringBuilder detail = new System.Text.StringBuilder();
                 foreach (Process p in orphans)
                 {
@@ -871,9 +898,21 @@ namespace Archon
 
                 int ended = 0;
                 int failed = 0;
-                foreach (Process p in orphans)
+                for (int i = 0; i < orphans.Count; i++)
                 {
-                    try { p.Kill(); ended++; }
+                    Process p = orphans[i];
+                    try
+                    {
+                        // leave anything that exited or got replaced under the
+                        // same pid while the prompt was up, and any client that
+                        // was only starting and has its window by now
+                        p.Refresh();
+                        if (!StillSameProcess(p, startedAt[i]) || p.MainWindowHandle != IntPtr.Zero)
+                            continue;
+
+                        p.Kill();
+                        ended++;
+                    }
                     catch { failed++; }
                 }
 
