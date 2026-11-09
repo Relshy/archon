@@ -121,15 +121,13 @@ namespace Archon
 
                 try
                 {
-                    // don't even read it if nothing changed since last time
-                    DateTime stamp;
-                    try
-                    {
-                        stamp = File.Exists(settingsPath)
-                            ? File.GetLastWriteTimeUtc(settingsPath)
-                            : DateTime.MinValue;
-                    }
-                    catch { stamp = DateTime.MinValue; }
+                    // don't even read it if nothing changed since last time.
+                    // a failed stat has to skip the file, not count as it
+                    // being missing - "missing" gets a fresh file holding only
+                    // our flag, written over whatever else is in there.
+                    DateTime stamp = File.Exists(settingsPath)
+                        ? File.GetLastWriteTimeUtc(settingsPath)
+                        : DateTime.MinValue;
 
                     DateTime lastSeen;
                     if (targetFps == _lastTarget &&
@@ -150,6 +148,14 @@ namespace Archon
 
                     try { _seenStamp[settingsPath] = File.GetLastWriteTimeUtc(settingsPath); }
                     catch { _seenStamp.Remove(settingsPath); }
+                }
+                catch (IOException)
+                {
+                    // usually the bootstrapper holding the file mid-write, the
+                    // exact moment the cap matters. the stamp is already
+                    // recorded, so without forgetting it every later poll
+                    // would skip this file until something else changed it.
+                    _seenStamp.Remove(settingsPath);
                 }
                 catch { /* one unwritable install should not block the rest */ }
             }
