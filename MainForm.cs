@@ -151,6 +151,11 @@ namespace Archon
         private readonly Dictionary<int, DateTime> _lostWindowAt = new Dictionary<int, DateTime>();
 
         private readonly List<RobloxAccount> _accounts = new List<RobloxAccount>();
+
+        // accounts.dat is there but couldn't be read. nothing gets saved until
+        // a read goes through, or the empty list would replace the whole file.
+        private bool _accountsUnread;
+
         private readonly PerformanceSettings _perf = PerformanceSettings.Load();
 
         private static readonly int[] FpsPresets = { 0, 30, 60, 120, 144, 240, PerformanceSettings.Unlimited };
@@ -1105,8 +1110,15 @@ namespace Archon
         private void LoadAccounts()
         {
             _accounts.Clear();
+            _accountsUnread = false;
             try { _accounts.AddRange(AccountStore.Load()); }
-            catch (Exception ex) { Warn("Could not read saved accounts", ex.Message); }
+            catch (Exception ex)
+            {
+                _accountsUnread = true;
+                Warn("Could not read saved accounts",
+                     ex.Message + "\r\n\r\nAccounts can't be added until the file can be read, " +
+                     "so the ones already saved aren't overwritten.");
+            }
 
             if (_selAccount >= _accounts.Count) _selAccount = _accounts.Count - 1;
             if (_selAccount < 0 && _accounts.Count > 0) _selAccount = 0;
@@ -1114,6 +1126,13 @@ namespace Archon
 
         private void AddAccount()
         {
+            // the lock that failed the startup read may be gone by now
+            if (_accountsUnread)
+            {
+                LoadAccounts();
+                if (_accountsUnread) return;
+            }
+
             using (AddAccountForm dialog = new AddAccountForm())
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null) return;
@@ -1159,6 +1178,7 @@ namespace Archon
 
         private void SaveAccounts()
         {
+            if (_accountsUnread) return;   // see _accountsUnread
             try { AccountStore.Save(_accounts); }
             catch (Exception ex) { Warn("Could not save accounts", ex.Message); }
         }
