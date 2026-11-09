@@ -1559,7 +1559,7 @@ namespace Archon
                 if (r.Bottom < body.Y - 4f || r.Y > body.Bottom + 4f) continue;
 
                 Spot("card." + _instances[i].Pid, r);
-                PaintInstanceCard(g, r, _instances[i], i);
+                PaintInstanceCard(g, r, _instances[i]);
             }
 
             _spotClip = RectangleF.Empty;
@@ -1568,7 +1568,7 @@ namespace Archon
             PaintScrollHint(g, body, _instanceContentH, _instanceViewH, _instanceScroll);
         }
 
-        private void PaintInstanceCard(Graphics g, RectangleF r, InstanceRow inst, int index)
+        private void PaintInstanceCard(Graphics g, RectangleF r, InstanceRow inst)
         {
             bool selected = inst.Pid == _selInstancePid;
             float hover = Hover("card." + inst.Pid);
@@ -1629,8 +1629,8 @@ namespace Archon
             Spot("more." + inst.Pid, more);
 
             Widgets.Button(g, focus, "Focus", selected ? Btn.Primary : Btn.Secondary,
-                           Hover("focus." + index), inst.HasWindow, 10f);
-            Widgets.More(g, more, Hover("more." + index), 10f);
+                           Hover("focus." + inst.Pid), inst.HasWindow, 10f);
+            Widgets.More(g, more, Hover("more." + inst.Pid), 10f);
         }
 
         private void Metric(Graphics g, float x, float y, float w, string label, string value, float amount)
